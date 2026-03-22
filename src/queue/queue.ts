@@ -57,6 +57,7 @@ export class Queue extends DurableObject {
 				headers: {
 					'User-Agent': 'SimpleQueue',
 					'x-api-key': (this.env as Env).API_KEY,
+					'Content-Type': 'application/json',
 				},
 			});
 
