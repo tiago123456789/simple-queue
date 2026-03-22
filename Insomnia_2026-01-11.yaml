@@ -1,25 +1,23 @@
 type: collection.insomnia.rest/5.0
-name: "Flat "
+name: Simple queue
 meta:
-  id: wrk_72feaa3b93bc41668779d9d0e97942fb
-  created: 1759003288979
-  modified: 1759003288979
+  id: wrk_4328e74c964341cdb7fc323b1622e1bc
+  created: 1774192142120
+  modified: 1774193143411
 collection:
   - name: Queue
     meta:
-      id: fld_b3f892c653db4db9add8482a6e8f3d18
+      id: fld_67180d4b084747b5bdebb814fc3885a4
       created: 1759003300240
       modified: 1768068663391
       sortKey: -1759003300241
     children:
-      - url: "{{ _.BASE_URL
-          }}/publish?url=https://webhook-test.com/e01ac37d854e31969cb9877cfd489\
-          b3f"
+      - url: "{{ _.BASE_URL }}/publish?url=https://silly-tiger-70.webhook.cool"
         name: Publish a message
         meta:
-          id: req_c91d0313832b4b7fb3bf4935d6d4a048
+          id: req_42c84f42b41d40ce83336369baf5bbb2
           created: 1759003302889
-          modified: 1768158285766
+          modified: 1774192584923
           isPrivate: false
           sortKey: -1759003302889
         method: POST
@@ -34,13 +32,13 @@ collection:
         headers:
           - name: Content-Type
             value: application/json
-            id: pair_1fe190c2518243e1b6befb22c06bc788
+            id: pair_31d372d3655143f3896c93632bfe29e4
           - name: User-Agent
             value: insomnia/11.0.2
-            id: pair_8b762b56b085431ea49456c29f4c9ebf
-          - id: pair_1be54e92eaf44b9cbf97ac39fb1a0851
-            name: x-api-key
-            disabled: false
+            id: pair_26ea005795334b8ca8d1e9fc74f89507
+          - name: x-api-key
+            value: api_key_here
+            id: pair_69510088d0ef41fe86a5cad0f575c5b1
         settings:
           renderRequestBody: true
           encodeUrl: true
@@ -52,9 +50,9 @@ collection:
       - url: "{{ _.BASE_URL }}/process"
         name: Consume message
         meta:
-          id: req_31ece38059d24c598ddda09bae7a4205
+          id: req_4a5b7481a16446e3bdc781ea15876686
           created: 1768070990680
-          modified: 1768158300106
+          modified: 1774192514576
           isPrivate: false
           sortKey: -1759002857854
         method: GET
@@ -63,13 +61,13 @@ collection:
         headers:
           - name: Content-Type
             value: application/json
-            id: pair_1fc087f34434423d81eab1cf82c38691
+            id: pair_264efb7623054b9285f9fa546403f4e6
           - name: User-Agent
             value: insomnia/11.0.2
-            id: pair_db7026c183864343b5515c56bdceb02c
-          - id: pair_5a82cba085e049cabcfa768418bf6000
-            name: x-api-key
-            disabled: false
+            id: pair_7872bfe110c64df8a09823a235632708
+          - name: x-api-key
+            value: api_key_here
+            id: pair_375dc5cdbcc743ebbc251be356d811ac
         settings:
           renderRequestBody: true
           encodeUrl: true
@@ -81,9 +79,9 @@ collection:
       - url: "{{ _.BASE_URL }}/stats"
         name: Queue stats
         meta:
-          id: req_e647f2c834b94466ba4c825e8ec28084
+          id: req_589ee95b78614e9dafe86b7a5ebe3a25
           created: 1768086967025
-          modified: 1768158290780
+          modified: 1774192619122
           isPrivate: false
           sortKey: -1759003080371.5
         method: GET
@@ -92,13 +90,13 @@ collection:
         headers:
           - name: Content-Type
             value: application/json
-            id: pair_5751181fa1854d1fa3d2035a9e9823b1
+            id: pair_44f22b470f4445edb76f98decf1cfd0f
           - name: User-Agent
             value: insomnia/11.0.2
-            id: pair_e6b9a1820bf04e9dbf6e12680fc708f0
-          - id: pair_5e1ae16138f24cf08a2a4788184a7208
-            name: x-api-key
-            disabled: false
+            id: pair_d6e34c7589284d8c8d5b5481d74d40eb
+          - name: x-api-key
+            value: api_key_here
+            id: pair_6ab1df442f1b4dbd940e92f551511c29
         settings:
           renderRequestBody: true
           encodeUrl: true
@@ -110,9 +108,9 @@ collection:
       - url: "{{ _.BASE_URL }}/dashboard"
         name: Queue dashboard
         meta:
-          id: req_0426e62b24ba474787b5edf691ada666
+          id: req_b85f9fd3e3114bef892ff7efaa699080
           created: 1768138493875
-          modified: 1768158294469
+          modified: 1774192289361
           isPrivate: false
           sortKey: -1759002969112.75
         method: GET
@@ -121,13 +119,107 @@ collection:
         headers:
           - name: Content-Type
             value: text/html
-            id: pair_5751181fa1854d1fa3d2035a9e9823b1
+            id: pair_7414b2492c9e4d1fbc58c87def5f3d7d
           - name: User-Agent
             value: insomnia/11.0.2
-            id: pair_e6b9a1820bf04e9dbf6e12680fc708f0
-          - id: pair_5e1ae16138f24cf08a2a4788184a7208
-            name: x-api-key
-            disabled: false
+            id: pair_88686360b6ab46a99aff89d87b17a843
+          - name: x-api-key
+            value: api_key_here
+            id: pair_abeae5d2b40f4bae93267cb789ac007f
+        settings:
+          renderRequestBody: true
+          encodeUrl: true
+          followRedirects: global
+          cookies:
+            send: true
+            store: true
+          rebuildPath: true
+      - url: "{{ _.BASE_URL }}/process?groupId=queue1"
+        name: Consume message using group id
+        meta:
+          id: req_c1c3d152257547d29c029f1d6d2121d7
+          created: 1774192532187
+          modified: 1774192539043
+          isPrivate: false
+          sortKey: -1759002190301.5
+        method: GET
+        body:
+          mimeType: application/json
+        headers:
+          - name: Content-Type
+            value: application/json
+            id: pair_264efb7623054b9285f9fa546403f4e6
+          - name: User-Agent
+            value: insomnia/11.0.2
+            id: pair_7872bfe110c64df8a09823a235632708
+          - name: x-api-key
+            value: api_key_here
+            id: pair_375dc5cdbcc743ebbc251be356d811ac
+        settings:
+          renderRequestBody: true
+          encodeUrl: true
+          followRedirects: global
+          cookies:
+            send: true
+            store: true
+          rebuildPath: true
+      - url: "{{ _.BASE_URL }}/stats?groupId=queue1"
+        name: Queue stats using group id
+        meta:
+          id: req_7f928d477ccd4e5fbaae00fc8da425b3
+          created: 1774192554334
+          modified: 1774192610160
+          isPrivate: false
+          sortKey: -1759003024742.125
+        method: GET
+        body:
+          mimeType: application/json
+        headers:
+          - name: Content-Type
+            value: application/json
+            id: pair_d093deb32cf540ca974b605419054ef0
+          - name: User-Agent
+            value: insomnia/11.0.2
+            id: pair_2dca438a529846b587b6d6fa5644b14d
+          - name: x-api-key
+            value: api_key_here
+            id: pair_13cdac08d55a41ca985114aa7d6f9017
+        settings:
+          renderRequestBody: true
+          encodeUrl: true
+          followRedirects: global
+          cookies:
+            send: true
+            store: true
+          rebuildPath: true
+      - url: "{{ _.BASE_URL
+          }}/publish?groupId=queue1&url=https://silly-tiger-70.webhook.cool"
+        name: Publish a message using group id
+        meta:
+          id: req_713d9d34203949a98a40414cf65179c1
+          created: 1774192575470
+          modified: 1774192575470
+          isPrivate: false
+          sortKey: -1759003191630.25
+        method: POST
+        body:
+          mimeType: application/json
+          text: |-
+            {
+            	"message": "Hi {% faker 'randomFirstName' %}, How are you doing",
+            	"timestamp": "{% faker 'timestamp' %}",
+            	"test": true
+            }
+        headers:
+          - name: Content-Type
+            value: application/json
+            id: pair_31d372d3655143f3896c93632bfe29e4
+          - name: User-Agent
+            value: insomnia/11.0.2
+            id: pair_26ea005795334b8ca8d1e9fc74f89507
+          - name: x-api-key
+            value: api_key_here
+            id: pair_69510088d0ef41fe86a5cad0f575c5b1
         settings:
           renderRequestBody: true
           encodeUrl: true
@@ -139,20 +231,20 @@ collection:
 cookieJar:
   name: Default Jar
   meta:
-    id: jar_f72bbe65b3fa88e8e7787534e56ed2626a92e3d1
+    id: jar_0d05a2cd51234ec9b3339a4fb6296dc5
     created: 1759003289071
     modified: 1759003289071
 environments:
   name: Base Environment
   meta:
-    id: env_f72bbe65b3fa88e8e7787534e56ed2626a92e3d1
+    id: env_026ba62aa655402086b250443d82f472
     created: 1759003289045
     modified: 1759003289045
     isPrivate: false
   subEnvironments:
     - name: dev
       meta:
-        id: env_c1952b2d9ccc4b6689095d565407b89f
+        id: env_fb3c6eb9d1e24d10ad6bea9f9ae64be7
         created: 1768139335369
         modified: 1768139352224
         isPrivate: false
@@ -161,7 +253,7 @@ environments:
         BASE_URL: http://localhost:8787
     - name: staging
       meta:
-        id: env_ddf7718f3dfd4a4c9c875d66adda75db
+        id: env_eac943e311864d4c983755f0aba1b44a
         created: 1768139355841
         modified: 1768139369362
         isPrivate: false
