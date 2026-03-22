@@ -30,6 +30,36 @@
 Open the groups.json file.
 Add a new name to the list. (Use simple names without special characters, like user_queue, product_queue, chatbot_queue.)
 
+### HOW TO PUBLISH A MESSAGE ON DEFAULT GROUP ID
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL_HERE/publish?url=URL_RECEIVE_MESSAGE' \
+  --header 'Content-Type: application/json' \
+  --header 'User-Agent: insomnia/11.0.2' \
+  --header 'x-api-key: api_key_here' \
+  --data '{
+	"message": "Hi test, How are you doing",
+	"timestamp": "1780776976949",
+	"test": true
+}'
+```
+
+### HOW TO PUBLISH A MESSAGE ON A CUSTOM GROUP ID
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL_HERE/publish?groupId=GROUP_ID_FROM_FILE_GROUPS.JSON&url=URL_RECEIVE_MESSAGE' \
+  --header 'Content-Type: application/json' \
+  --header 'User-Agent: insomnia/11.0.2' \
+  --header 'x-api-key: api_key_here' \
+  --data '{
+	"message": "Hi test, How are you doing",
+	"timestamp": "1780776976949",
+	"test": true
+}'
+```
+
 ### HOW TO SETUP THE SCHEDULER
 
 - Create a Supabase account
@@ -39,6 +69,7 @@ Add a new name to the list. (Use simple names without special characters, like u
   - Set the schedule to execute every 5 seconds
   - Type **SQL Snippet**
   - SQL snippet:
+
   ```sql
   select
   net.http_get(
@@ -47,7 +78,19 @@ Add a new name to the list. (Use simple names without special characters, like u
       timeout_milliseconds:=60000
   );
   ```
+
+  - SQL snippet to consume a specific group
+
+  ```sql
+  select
+  net.http_get(
+      url:='YOUR_SIMPLE_QUEUE_APPLICATION_URL/process?groupId=GROUP_ID_FROM_FILE_GROUPS.JSON',
+      headers:=jsonb_build_object('x-api-key', 'YOUR_API_KEY'),
+      timeout_milliseconds:=60000
+  );
+
   - Click on button to save
+  ```
 
 ## ARCHITECTURE
 
