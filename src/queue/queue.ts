@@ -27,7 +27,8 @@ export class Queue extends DurableObject {
 				payload TEXT NOT NULL,
 				created_at INTEGER NOT NULL,
 				status INTEGER,
-				retries INTEGER DEFAULT 0
+				retries INTEGER DEFAULT 0,
+				visibility_at INTEGER DEFAULT 0
 			);
 			CREATE INDEX IF NOT EXISTS queue_idx ON queue(id);
 
@@ -40,7 +41,10 @@ export class Queue extends DurableObject {
 				retries INTEGER DEFAULT 0
 			);
 			CREATE INDEX IF NOT EXISTS queue_dlq_idx ON queue_dlq(id);
-	`);
+		`);
+		try {
+			await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN visibility_at INTEGER DEFAULT 0;`);
+		} catch (e) {}
 	}
 
 	private async delete(id: string) {
@@ -80,9 +84,9 @@ export class Queue extends DurableObject {
 	private async getNextFromQueue(limit: number = 1): Promise<Array<Message>> {
 		const results = await this.ctx.storage.sql.exec(
 			`UPDATE queue SET status = ?
-			WHERE id in (SELECT id FROM queue WHERE status = ? ORDER BY created_at ASC LIMIT ?)
+			WHERE id in (SELECT id FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) ORDER BY created_at ASC LIMIT ?)
 			RETURNING id, url, payload, retries;`,
-			...[STATUS.PROCESSING, STATUS.PENDING, limit],
+			...[STATUS.PROCESSING, STATUS.PENDING, Date.now(), limit],
 		);
 
 		const items = results.toArray();
@@ -129,12 +133,12 @@ export class Queue extends DurableObject {
 		requestTriggerParallel = [];
 	}
 
-	async add(id: string, url: string, payload: { [key: string]: any }): Promise<boolean> {
+	async add(id: string, url: string, payload: { [key: string]: any }, visibilityAt: number = 0): Promise<boolean> {
 		try {
 			await this.ctx.storage.sql.exec(
-				`INSERT INTO queue (id, url, payload, created_at, status)
-			VALUES (?, ?, ?, ?, ?)`,
-				...[id, url, JSON.stringify(payload), Date.now(), STATUS.PENDING],
+				`INSERT INTO queue (id, url, payload, created_at, status, visibility_at)
+				VALUES (?, ?, ?, ?, ?, ?)`,
+				...[id, url, JSON.stringify(payload), Date.now(), STATUS.PENDING, visibilityAt],
 			);
 			return true;
 		} catch (error) {

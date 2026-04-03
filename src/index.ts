@@ -3,6 +3,7 @@ import { Env, Queue } from './queue/queue.js';
 import { cors } from 'hono/cors';
 import { getHTML } from './utils/template.js';
 import * as hasher from './utils/hasher.js';
+import { parseDelay } from './utils/delay.js';
 import groups from './../groups.json' with { type: 'json' };
 import * as groupUtil from './utils/group.js';
 import SCHEMAS_VALIDATIONS from './schemas-validation.js';
@@ -27,7 +28,7 @@ app.use('*', async (c, next) => {
 			{
 				message: 'Unauthorized: Missing or invalid API key',
 			},
-			401
+			401,
 		);
 	}
 
@@ -59,24 +60,48 @@ app.post('/publish', async (c) => {
 		return c.json({ message: 'Queue not found' }, 500);
 	}
 
-
+	let visibilityAt = 0;
 	try {
-		const schema = SCHEMAS_VALIDATIONS[groupUtil.get(groupId)] || null
+		const delay = c.req.query('delay');
+		if (delay) {
+			const result = parseDelay(delay);
+			if (!result.success) {
+				if (result.error === 'INVALID_FORMAT') {
+					throw new Error('Invalid delay format. Valid formats: 1s, 30s, 1m, 30m, 1h');
+				}
+				throw new Error('Maximum delay is 24 hours');
+			}
+			visibilityAt = result.visibilityAt;
+		}
+
+		const schema = SCHEMAS_VALIDATIONS[groupUtil.get(groupId)];
 		if (schema) {
 			schema.parse(payload);
 		}
-	} catch (error) {
+	} catch (error: any) {
 		if (error instanceof z.ZodError) {
-			return c.json({
-				message: "Validation failed",
-				error: JSON.parse(error.message)
-			}, 400);
+			return c.json(
+				{
+					message: 'Validation failed',
+					error: JSON.parse(error.message),
+				},
+				400,
+			);
 		}
+
+		return c.json(
+			{
+				message: error.message,
+				error: error.message,
+			},
+			400,
+		);
 	}
 
 	const jsonString = JSON.stringify(payload);
 	const id = await hasher.get(jsonString);
-	const storedMessage = await queueStub.add(id, url as string, payload);
+
+	const storedMessage = await queueStub.add(id, url as string, payload, visibilityAt);
 	return c.json({ storedMessage: storedMessage });
 });
 
@@ -125,22 +150,23 @@ app.get('/dashboard', async (c) => {
 	const offset = (page - 1) * limit;
 
 	const stats = await queueStub.getStats();
-	const selectOptions = groups.map(g => `<option value="${g}" ${g === groupId ? 'selected' : ''}>${g}</option>`).join('');
+	const selectOptions = groups.map((g) => `<option value="${g}" ${g === groupId ? 'selected' : ''}>${g}</option>`).join('');
 
 	let content = '';
-	let basedLink = `/dashboard?x-api-key=${apiKey}&groupId=${groupId}`
+	let basedLink = `/dashboard?x-api-key=${apiKey}&groupId=${groupId}`;
 	if (tab === 'messages') {
 		const messages = await queueStub.getMessages(limit, offset);
 		const totalMessagesRaw = await queueStub.getTotalMessages();
 		const totalMessages = Number(totalMessagesRaw) || 0;
 		const totalPages = Math.ceil(totalMessages / limit);
 
-		const messageRows = messages.map(msg => {
-			const createdAt = new Date(Number(msg.created_at)).toLocaleString();
-			const payloadStr = String(msg.payload || '');
-			const payloadTruncated = payloadStr.length > 100 ? payloadStr.substring(0, 100) + '...' : payloadStr;
-			const statusText = Number(msg.status) === 0 ? 'Pending' : Number(msg.status) === 1 ? 'Processing' : 'Unknown';
-			return `
+		const messageRows = messages
+			.map((msg) => {
+				const createdAt = new Date(Number(msg.created_at)).toLocaleString();
+				const payloadStr = String(msg.payload || '');
+				const payloadTruncated = payloadStr.length > 100 ? payloadStr.substring(0, 100) + '...' : payloadStr;
+				const statusText = Number(msg.status) === 0 ? 'Pending' : Number(msg.status) === 1 ? 'Processing' : 'Unknown';
+				return `
 				<tr>
 					<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${msg.id}</td>
 					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${msg.url}</td>
@@ -150,18 +176,26 @@ app.get('/dashboard', async (c) => {
 					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${msg.retries}</td>
 				</tr>
 			`;
-		}).join('');
+			})
+			.join('');
 
 		const pagination = [];
 		if (page > 1) {
-			pagination.push(`<a href="${basedLink}&tab=messages&page=${page - 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-l-md hover:bg-gray-50">Previous</a>`);
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${page - 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-l-md hover:bg-gray-50">Previous</a>`,
+			);
 		}
 		for (let i = Math.max(1, page - 2); i <= Math.min(totalPages, page + 2); i++) {
-			const activeClass = i === page ? 'bg-indigo-50 border-indigo-500 text-indigo-600' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50';
-			pagination.push(`<a href="${basedLink}&tab=messages&page=${i}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium ${activeClass} border">${i}</a>`);
+			const activeClass =
+				i === page ? 'bg-indigo-50 border-indigo-500 text-indigo-600' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50';
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${i}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium ${activeClass} border">${i}</a>`,
+			);
 		}
 		if (page < totalPages) {
-			pagination.push(`<a href="${basedLink}&tab=messages&page=${page + 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-r-md hover:bg-gray-50">Next</a>`);
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${page + 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-r-md hover:bg-gray-50">Next</a>`,
+			);
 		}
 
 		content = `
