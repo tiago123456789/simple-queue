@@ -215,12 +215,180 @@ select net.http_get(
 - `HTTP_REQUEST_TIMEOUT`: Request timeout in seconds
 - `TOTAL_RETRIES_BEFORE_DQL`: Retry attempts before dead letter
 - `TOTAL_MESSAGES_PULL_PER_TIME`: Messages processed per batch
+- `ENABLE_CONTROL_CONCURRENCY`: Enable/disable consumer-based concurrency control (default: false)
+- `LIMIT_CONSUMER_PROCESS`: Consumer expiry time in minutes when using concurrency control (default: 15)
 
 ### Limitations (Free Tier)
 
 - 128MB memory limit
 - 1,000 requests/minute
 - 100,000 writes/day
+
+---
+
+## Consumer-Based Concurrency Control
+
+A powerful feature that gives you precise control over how many messages are processed simultaneously. Perfect for rate-limiting sensitive third-party APIs or preventing server overload.
+
+### Why Use This Feature?
+
+- **Rate Limit Protection**: Prevent overwhelming third-party APIs or downstream services
+- **Fair Distribution**: Messages are processed evenly across your consumer pool
+- **Automatic Recovery**: Expired consumers are automatically reset to prevent stuck messages
+- **No Waiting**: Requests are sent without waiting for response (fire-and-forget), improving throughput
+- **Visibility**: Track consumer status (WAITING, WORKING) in real-time via dashboard
+
+### How It Works
+
+1. **Create Consumers**: Register consumer instances that will process messages
+2. **Process Messages**: Each message is assigned to a WAITING consumer
+3. **Fire-and-Forget**: Requests are sent immediately without waiting for response
+4. **Notify Completion**: Third-party apps call an endpoint when done processing
+5. **Auto-Reset**: Consumers expire after a timeout to handle abandoned processing
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    External Scheduler                             │
+│               (calls /process every 5 seconds)                   │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   GET /process?groupId=X                         │
+│           (only if ENABLE_CONTROL_CONCURRENCY=true)              │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+         ┌──────────────────────┼──────────────────────┐
+         ▼                      ▼                      ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│   Consumer-1    │  │   Consumer-2    │  │   Consumer-N    │
+│   (WAITING)    │  │   (WORKING)     │  │   (WAITING)    │
+│                 │  │  expires in 15m │  │                 │
+└────────┬────────┘  └────────┬────────┘  └────────┬────────┘
+         │                    │                    │
+         └────────────────────┼────────────────────┘
+                              │
+                              ▼
+                    Message Processing
+                    + Header: consumer-id: <uuid>
+```
+
+### Enabling the Feature
+
+Set the environment variable in `wrangler.jsonc`:
+
+```jsonc
+"vars": {
+  "ENABLE_CONTROL_CONCURRENCY": true,
+  "LIMIT_CONSUMER_PROCESS": 15
+}
+```
+
+### Creating Consumers
+
+Navigate to the dashboard or use the API to create consumers:
+
+```bash
+# Via dashboard: GET /consumers?x-api-key=YOUR_KEY
+# Select group, enter count, click Create
+
+# Via API
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL/consumers?x-api-key=api_key_here' \
+  --header 'Content-Type: application/json' \
+  --data '{"groupId": "DEFAULT", "count": 5}'
+```
+
+### Processing Messages
+
+When consumers are available, messages are sent with `consumer-id` and `group-id` headers:
+
+```bash
+# Third-party receives request with:
+# Header: consumer-id: 550e8400-e29b-41d4-a716-446655440000
+# Header: group-id: DEFAULT
+# Header: x-api-key: api_key_here
+# Body: { ...your payload... }
+```
+
+Your application should use the `consumer-id` header to notify completion when done processing.
+
+### Notifying Completion
+
+After processing, your application notifies the queue:
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL/consumer-is-ready-process-next-message?groupId=DEFAULT' \
+  --header 'Content-Type: application/json' \
+  --data '{"consumerId": "550e8400-e29b-41d4-a716-446655440000"}'
+```
+
+### Resetting Expired Consumers
+
+If a consumer times out (was processing for too long), reset them:
+
+```bash
+curl --request GET \
+  --url 'SIMPLE_QUEUE_URL/reset-consumers?groupIds=DEFAULT,queue1&x-api-key=api_key_here'
+```
+
+### Setting Up the Reset Scheduler
+
+Create a second Supabase cron job to automatically reset expired consumers:
+
+- Create a new cronjob
+- Add a name (e.g., "Reset Expired Consumers")
+- Set the schedule to execute every 30 seconds (or your preferred interval)
+- Type **SQL Snippet**
+- SQL snippet for all groups:
+
+```sql
+select
+net.http_get(
+    url:='YOUR_SIMPLE_QUEUE_APPLICATION_URL/reset-consumers?groupIds=DEFAULT,queue1,queue2',
+    headers:=jsonb_build_object('x-api-key', 'YOUR_API_KEY'),
+    timeout_milliseconds:=60000
+);
+```
+
+**Note:** Adjust `groupIds` to match your configured groups in `groups.json`.
+
+### Managing Consumers via Dashboard
+
+Access the consumer management page:
+
+```
+GET /consumers?x-api-key=api_key_here
+```
+
+Features:
+- View all consumers (WAITING, WORKING, EXPIRED)
+- Filter by group
+- Delete WAITING consumers
+- Create new consumers
+- Monitor expiry times
+
+### Consumer Status
+
+| Status | Description |
+|--------|-------------|
+| `WAITING` | Ready to process messages |
+| `WORKING` | Currently processing a message |
+| `EXPIRED` | Timed out while working (needs reset) |
+
+### Benefits Summary
+
+| Benefit | Description |
+|---------|-------------|
+| **Precise Control** | Limit concurrent processing to exact numbers |
+| **No Bottlenecks** | Fire-and-forget sends don't wait for responses |
+| **Auto-Recovery** | Expired consumers are automatically reset |
+| **Visibility** | Real-time status via dashboard |
+| **Scalability** | Add more consumers anytime |
+| **Flexibility** | Different limits per group |
 
 ### Load Test Results
 

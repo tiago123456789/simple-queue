@@ -1,6 +1,7 @@
-import axios from 'axios';
+import axios from 'redaxios';
 import Message from '../types/message.js';
 import STATUS from '../types/status.js';
+import { Consumer } from '../types/consumer.js';
 import { DurableObject } from 'cloudflare:workers';
 
 export interface Env {
@@ -9,7 +10,14 @@ export interface Env {
 	HTTP_REQUEST_TIMEOUT: number;
 	TOTAL_RETRIES_BEFORE_DQL: number;
 	TOTAL_MESSAGES_PULL_PER_TIME: number;
+	ENABLE_CONTROL_CONCURRENCY: boolean;
+	LIMIT_CONSUMER_PROCESS: number;
 }
+
+const CONSUMER_STATUS = {
+	WAITING: 'WAITING',
+	WORKING: 'WORKING',
+} as const;
 
 export class Queue extends DurableObject {
 	constructor(ctx: DurableObjectState, env: Env) {
@@ -41,17 +49,147 @@ export class Queue extends DurableObject {
 				retries INTEGER DEFAULT 0
 			);
 			CREATE INDEX IF NOT EXISTS queue_dlq_idx ON queue_dlq(id);
+
+			CREATE TABLE IF NOT EXISTS consumers(
+				id TEXT PRIMARY KEY,
+				group_id TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				status TEXT NOT NULL,
+				expired_at INTEGER
+			);
+			CREATE INDEX IF NOT EXISTS consumers_idx ON consumers(id);
 		`);
 		try {
 			await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN visibility_at INTEGER DEFAULT 0;`);
 		} catch (e) {}
 	}
 
+	private getConsumerExpiryMs(): number {
+		const limit = (this.env as Env).LIMIT_CONSUMER_PROCESS;
+		return (limit > 0 ? limit : 15) * 60 * 1000;
+	}
+
+	async createConsumers(count: number): Promise<string[]> {
+		const ids: string[] = [];
+		const groupId = this.ctx.id.toString();
+		for (let i = 0; i < count; i++) {
+			const id = crypto.randomUUID();
+			await this.ctx.storage.sql.exec(
+				`INSERT INTO consumers (id, group_id, created_at, status, expired_at) 
+				VALUES (?, ?, ?, ?, ?)`,
+				...[id, groupId, Date.now(), CONSUMER_STATUS.WAITING, null],
+			);
+			ids.push(id);
+		}
+		return ids;
+	}
+
+	async getWaitingConsumers(limit: number): Promise<Consumer[]> {
+		const expiredAt = Date.now() + this.getConsumerExpiryMs();
+		const results = await this.ctx.storage.sql.exec(
+			`UPDATE consumers 
+			SET status = ?, expired_at = ?
+			WHERE id IN (
+				SELECT id FROM consumers 
+				WHERE status = ? 
+				ORDER BY created_at ASC LIMIT ?
+			)
+			RETURNING id, group_id, created_at, status, expired_at;`,
+			...[CONSUMER_STATUS.WORKING, expiredAt, CONSUMER_STATUS.WAITING, limit],
+		);
+
+		return results.toArray().map((item) => ({
+			id: String(item.id),
+			group_id: String(item.group_id),
+			created_at: Number(item.created_at),
+			status: String(item.status) as 'WAITING' | 'WORKING',
+			expired_at: item.expired_at !== null ? Number(item.expired_at) : null,
+		}));
+	}
+
+	async markConsumerReady(consumerId: string): Promise<boolean> {
+		await this.ctx.storage.sql.exec(
+			`UPDATE consumers SET status = ?, expired_at = NULL WHERE id = ?`,
+			...[CONSUMER_STATUS.WAITING, consumerId],
+		);
+		return true;
+	}
+
+	async resetExpiredConsumers(): Promise<number> {
+		const result = await this.ctx.storage.sql.exec(
+			`UPDATE consumers 
+			SET status = ?, expired_at = NULL 
+			WHERE expired_at IS NOT NULL AND expired_at < ? AND status = ?`,
+			...[CONSUMER_STATUS.WAITING, Date.now(), CONSUMER_STATUS.WORKING],
+		);
+		return result.toArray().length;
+	}
+
+	async deleteConsumer(consumerId: string): Promise<{ success: boolean; message: string }> {
+		const check = await this.ctx.storage.sql.exec(`SELECT status FROM consumers WHERE id = ?`, [consumerId]);
+		const item = check.toArray()[0];
+
+		if (!item) {
+			return { success: false, message: 'Consumer not found' };
+		}
+
+		if (item.status !== CONSUMER_STATUS.WAITING) {
+			return { success: false, message: 'Cannot delete consumer that is WORKING. Wait for it to become WAITING.' };
+		}
+
+		await this.ctx.storage.sql.exec(`DELETE FROM consumers WHERE id = ?`, ...[consumerId]);
+		return { success: true, message: 'Consumer deleted' };
+	}
+
+	async getConsumerStats(): Promise<{ total: number; waiting: number; working: number; expired: number }> {
+		const total = await this.ctx.storage.sql.exec(`SELECT count(id) as count FROM consumers;`);
+		const waiting = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as count FROM consumers WHERE status = ?;`,
+			...[CONSUMER_STATUS.WAITING],
+		);
+		const working = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as count FROM consumers WHERE status = ?;`,
+			...[CONSUMER_STATUS.WORKING],
+		);
+		const expired = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as count FROM consumers WHERE expired_at IS NOT NULL AND expired_at < ?;`,
+			...[Date.now()],
+		);
+
+		return {
+			total: Number(total.toArray()[0]?.count) || 0,
+			waiting: Number(waiting.toArray()[0]?.count) || 0,
+			working: Number(working.toArray()[0]?.count) || 0,
+			expired: Number(expired.toArray()[0]?.count) || 0,
+		};
+	}
+
+	async getConsumers(limit: number = 100, offset: number = 0): Promise<Consumer[]> {
+		const results = await this.ctx.storage.sql.exec(
+			`SELECT id, group_id, created_at, status, expired_at 
+			FROM consumers ORDER BY created_at DESC LIMIT ? OFFSET ?;`,
+			...[limit, offset],
+		);
+		return results.toArray().map((item) => ({
+			id: String(item.id),
+			group_id: String(item.group_id),
+			created_at: Number(item.created_at),
+			status: String(item.status) as 'WAITING' | 'WORKING',
+			expired_at: item.expired_at !== null ? Number(item.expired_at) : null,
+		}));
+	}
+
 	private async delete(id: string) {
 		await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?;`, ...[id]);
 	}
 
-	private async process(message: Message) {
+	private async setMessagesPendingByIds(ids: string[]) {
+		if (ids.length === 0) return;
+		const placeholders = ids.map(() => '?').join(',');
+		await this.ctx.storage.sql.exec(`UPDATE queue SET status = ? WHERE id IN (${placeholders})`, ...[STATUS.PENDING, ...ids]);
+	}
+
+	private async process(message: Message, groupId: string) {
 		let url = message.url;
 
 		try {
@@ -62,6 +200,7 @@ export class Queue extends DurableObject {
 					'User-Agent': 'SimpleQueue',
 					'x-api-key': (this.env as Env).API_KEY,
 					'Content-Type': 'application/json',
+					'group-id': groupId,
 				},
 			});
 
@@ -112,10 +251,42 @@ export class Queue extends DurableObject {
 		);
 	}
 
-	async consume(limitPerTime: number = 1) {
+	async consume(limitPerTime: number = 1, groupId: string): Promise<void> {
+		if ((this.env as Env).ENABLE_CONTROL_CONCURRENCY) {
+			const consumerStats = await this.getConsumerStats();
+			if (consumerStats.waiting == 0) {
+				console.log('No waiting consumers available, resetting messages to pending');
+				return Promise.resolve();
+			}
+
+			const messages = await this.getNextFromQueue(consumerStats.waiting);
+			if (messages.length === 0) {
+				return Promise.resolve();
+			}
+
+			const consumers = await this.getWaitingConsumers(messages.length);
+			const processCount = Math.min(messages.length, consumers.length);
+			const messagesToProcess = messages.slice(0, processCount);
+			for (let i = 0; i < messagesToProcess.length; i++) {
+				const message = messagesToProcess[i];
+				const consumerId = consumers[i].id;
+
+				if (message.retries > (this.env as Env).TOTAL_RETRIES_BEFORE_DQL) {
+					await this.moveMessageToDlq(message);
+					await this.delete(message.id);
+					await this.markConsumerReady(consumerId);
+				} else {
+					this.processWithoutWaiting(message, consumerId, groupId);
+					await this.delete(message.id);
+				}
+			}
+
+			return Promise.resolve();
+		}
+
 		const messages = await this.getNextFromQueue(limitPerTime);
-		if (messages.length == 0) {
-			return;
+		if (messages.length === 0) {
+			return Promise.resolve();
 		}
 
 		let requestTriggerParallel = [];
@@ -125,12 +296,31 @@ export class Queue extends DurableObject {
 				await this.moveMessageToDlq(message);
 				await this.delete(message.id);
 			} else {
-				requestTriggerParallel.push(this.process(message));
+				requestTriggerParallel.push(this.process(message, groupId));
 			}
 		}
 
 		await Promise.all(requestTriggerParallel);
 		requestTriggerParallel = [];
+		return Promise.resolve();
+	}
+
+	private processWithoutWaiting(message: Message, consumerId: string, groupId: string) {
+		console.log('Sending message (fire-and-forget):', message.id, 'consumer:', consumerId);
+		axios
+			.post(message.url, message.payload, {
+				timeout: (this.env as Env).HTTP_REQUEST_TIMEOUT * 1000,
+				headers: {
+					'User-Agent': 'SimpleQueue',
+					'x-api-key': (this.env as Env).API_KEY,
+					'Content-Type': 'application/json',
+					'consumer-id': consumerId,
+					'group-id': groupId,
+				},
+			})
+			.catch((error) => {
+				console.error('Error sending message (fire-and-forget):', message.id, error.message);
+			});
 	}
 
 	async add(id: string, url: string, payload: { [key: string]: any }, visibilityAt: number = 0): Promise<boolean> {
