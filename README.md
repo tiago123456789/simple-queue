@@ -77,6 +77,48 @@ curl --request POST \
 }'
 ```
 
+### HOW TO SET MESSAGE DELAY
+
+You can delay message delivery using the `delay` query parameter. The message will only be processed after the specified delay has passed.
+
+**Important:** If you don't specify a delay, the message will be processed immediately (no waiting).
+
+**Supported formats:**
+- `Xs` - seconds (e.g., `30s`)
+- `Xm` - minutes (e.g., `1m`, `30m`)
+- `Xh` - hours (e.g., `1h`)
+- `0s`, `0m`, `0h` - immediate delivery (same as not setting delay)
+
+**Maximum delay:** 24 hours
+
+**Example - Delay message by 1 minute:**
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL_HERE/publish?url=URL_RECEIVE_MESSAGE&delay=1m' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: api_key_here' \
+  --data '{
+	"message": "Hi test, delayed by 1 minute"
+}'
+```
+
+**Example - Delay message by 30 seconds on a custom group:**
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL_HERE/publish?groupId=mygroup&url=URL_RECEIVE_MESSAGE&delay=30s' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: api_key_here' \
+  --data '{
+	"message": "Hi test, delayed by 30 seconds"
+}'
+```
+
+**Error responses:**
+- `400 Bad Request` - `"Invalid delay format. Valid formats: 1s, 30s, 1m, 30m, 1h"`
+- `400 Bad Request` - `"Maximum delay is 24 hours"`
+
 ### HOW TO SETUP THE SCHEDULER
 
 - Create a Supabase account

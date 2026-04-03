@@ -53,6 +53,82 @@ Para configuração detalhada, verifique a [documentação completa](#como-execu
 - **Prevenção de Duplicatas**: Evita enviar a mesma mensagem duas vezes.
 - **Organização por Grupos**: Separe mensagens por app ou tarefa.
 - **Validação de Dados**: Garante que as mensagens correspondam aos formatos esperados.
+- **Atraso na Entrega**: Agende mensagens para serem entregues após um período específico.
+
+Abra o arquivo groups.json.
+Adicione um novo nome à lista. (Use nomes simples sem caracteres especiais, como user_queue, product_queue, chatbot_queue.)
+
+### COMO PUBLICAR UMA MENSAGEM NO GRUPO PADRÃO
+
+```bash
+curl --request POST \
+  --url 'URL_DA_FILA_SIMPLES_AQUI/publish?url=URL_RECEBER_MENSAGEM' \
+  --header 'Content-Type: application/json' \
+  --header 'User-Agent: insomnia/11.0.2' \
+  --header 'x-api-key: sua_chave_api_aqui' \
+  --data '{
+	"message": "Olá teste, como você está",
+	"timestamp": "1780776976949",
+	"test": true
+}'
+```
+
+### COMO PUBLICAR UMA MENSAGEM EM UM GRUPO PERSONALIZADO
+
+```bash
+curl --request POST \
+  --url 'URL_DA_FILA_SIMPLES_AQUI/publish?groupId=ID_DO_GRUPO_DO_ARQUIVO_GROUPS.JSON&url=URL_RECEBER_MENSAGEM' \
+  --header 'Content-Type: application/json' \
+  --header 'User-Agent: insomnia/11.0.2' \
+  --header 'x-api-key: sua_chave_api_aqui' \
+  --data '{
+	"message": "Olá teste, como você está",
+	"timestamp": "1780776976949",
+	"test": true
+}'
+```
+
+### COMO DEFINIR ATRASO NA ENTREGA DA MENSAGEM
+
+Você pode atrasar a entrega de mensagens usando o parâmetro de consulta `delay`. A mensagem só será processada após o atraso especificado ter passado.
+
+**Importante:** Se você não especificar um atraso, a mensagem será processada imediatamente (sem espera).
+
+**Formatos suportados:**
+- `Xs` - segundos (ex.: `30s`)
+- `Xm` - minutos (ex.: `1m`, `30m`)
+- `Xh` - horas (ex.: `1h`)
+- `0s`, `0m`, `0h` - entrega imediata (mesmo que não definir atraso)
+
+**Atraso máximo:** 24 horas
+
+**Exemplo - Atrasar mensagem em 1 minuto:**
+
+```bash
+curl --request POST \
+  --url 'URL_DA_FILA_SIMPLES_AQUI/publish?url=URL_RECEBER_MENSAGEM&delay=1m' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: sua_chave_api_aqui' \
+  --data '{
+	"message": "Olá teste, atrasado em 1 minuto"
+}'
+```
+
+**Exemplo - Atrasar mensagem em 30 segundos em um grupo personalizado:**
+
+```bash
+curl --request POST \
+  --url 'URL_DA_FILA_SIMPLES_AQUI/publish?groupId=meugrupo&url=URL_RECEBER_MENSAGEM&delay=30s' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: sua_chave_api_aqui' \
+  --data '{
+	"message": "Olá teste, atrasado em 30 segundos"
+}'
+```
+
+**Respostas de erro:**
+- `400 Bad Request` - `"Formato de atraso inválido. Formatos válidos: 1s, 30s, 1m, 30m, 1h"`
+- `400 Bad Request` - `"O atraso máximo é de 24 horas"`
 
 ## Visão Geral da Arquitetura
 
