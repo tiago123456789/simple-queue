@@ -264,7 +264,7 @@ export class Queue extends DurableObject {
 				return Promise.resolve();
 			}
 
-			const consumers = await this.getWaitingConsumers(consumerStats.waiting);
+			const consumers = await this.getWaitingConsumers(messages.length);
 			const processCount = Math.min(messages.length, consumers.length);
 			const messagesToProcess = messages.slice(0, processCount);
 			for (let i = 0; i < messagesToProcess.length; i++) {
