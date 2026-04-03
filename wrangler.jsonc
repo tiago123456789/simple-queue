@@ -26,9 +26,11 @@
 	],
 	"vars": {
 		"API_KEY": "api_key_here",
-		"HTTP_REQUEST_TIMEOUT": 5, // in seconds
+		"HTTP_REQUEST_TIMEOUT": 5,
 		"TOTAL_RETRIES_BEFORE_DQL": 3,
 		"TOTAL_MESSAGES_PULL_PER_TIME": 4,
+		"ENABLE_CONTROL_CONCURRENCY": true,
+		"LIMIT_CONSUMER_PROCESS": 5,
 	},
 	"compatibility_date": "2025-09-06",
 	"compatibility_flags": ["nodejs_compat"],
