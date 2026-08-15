@@ -44,6 +44,7 @@ function getQueueInstance(c: Context, groupId?: string) {
 
 app.post('/publish', async (c) => {
 	const url = c.req.query('url');
+	const queueType = c.req.query("queueType")
 	const payload = await c.req.json();
 
 	if (!url) {
@@ -101,6 +102,26 @@ app.post('/publish', async (c) => {
 	const jsonString = JSON.stringify(payload);
 	const id = await hasher.get(jsonString);
 
+	if (queueType == "chatQueue") {
+
+		if (!payload.sessionId) {
+			return c.json({ message: 'sessionId is required' }, 400);
+		}
+
+		if (!payload.message) {
+			return c.json({ message: 'message is required' }, 400);
+		}
+
+		console.log(payload)
+
+		const storedMessage = await queueStub.addInChatQueue(
+			id, url as string, payload, payload.sessionId, 
+			visibilityAt);
+		return c.json({ storedMessage: storedMessage });
+	}
+
+
+
 	const storedMessage = await queueStub.add(id, url as string, payload, visibilityAt);
 	return c.json({ storedMessage: storedMessage });
 });
@@ -118,6 +139,24 @@ app.get('/process', async (c) => {
 
 	const limit = (c.env as Env).TOTAL_MESSAGES_PULL_PER_TIME;
 	await queueStub.consume(limit, groupId || 'DEFAULT');
+	return c.json({ ok: true });
+});
+
+
+
+app.get('/process-chat-queue', async (c) => {
+	let groupId = c.req.query('groupId');
+	if (!groupsAllowed[groupUtil.get(groupId)]) {
+		return c.json({ message: 'Group id not found' }, 404);
+	}
+
+	const queueStub = getQueueInstance(c, groupUtil.get(groupId));
+	if (queueStub === null) {
+		return c.json({ message: 'Queue not found' }, 500);
+	}
+
+	const limit = (c.env as Env).TOTAL_MESSAGES_PULL_PER_TIME;
+	await queueStub.consumeChatQueue(limit, groupId || 'DEFAULT');
 	return c.json({ ok: true });
 });
 
@@ -219,15 +258,14 @@ app.get('/dashboard', async (c) => {
 							<a href="${basedLink}&tab=messages" class="border-indigo-500 text-indigo-600 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
 								Messages
 							</a>
-							${
-								(c.env as Env).ENABLE_CONTROL_CONCURRENCY
-									? `
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY
+				? `
 							<a href="/consumers?x-api-key=${apiKey}&groupId=${groupId}" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
 								Consumers
 							</a>
 							`
-									: ''
-							}
+				: ''
+			}
 						</nav>
 					</div>
 				</div>
@@ -297,15 +335,14 @@ app.get('/dashboard', async (c) => {
 							<a href="${basedLink}&tab=messages" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
 								Messages
 							</a>
-							${
-								(c.env as Env).ENABLE_CONTROL_CONCURRENCY
-									? `
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY
+				? `
 							<a href="/consumers?x-api-key=${apiKey}&groupId=${groupId}" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
 								Consumers
 							</a>
 							`
-									: ''
-							}
+				: ''
+			}
 						</nav>
 					</div>
 				</div>
@@ -329,9 +366,8 @@ app.get('/dashboard', async (c) => {
 								<div class="text-2xl font-bold text-green-600">${stats.totalMessagesWaitingRetry}</div>
 								<div class="text-sm text-gray-500">Total message waiting to retry</div>
 							</div>
-							${
-								(c.env as Env).ENABLE_CONTROL_CONCURRENCY && consumerStats
-									? `
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY && consumerStats
+				? `
 							<div class="text-center">
 								<div class="text-2xl font-bold text-indigo-600">${consumerStats.waiting}</div>
 								<div class="text-sm text-gray-500">Waiting consumers</div>
@@ -345,8 +381,8 @@ app.get('/dashboard', async (c) => {
 								<div class="text-sm text-gray-500">Expired consumers</div>
 							</div>
 							`
-									: ''
-							}
+				: ''
+			}
 						</div>
 					</div>
 				</div>
