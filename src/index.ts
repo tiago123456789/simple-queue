@@ -5,13 +5,21 @@ import { getHTML } from './utils/template.js';
 import * as hasher from './utils/hasher.js';
 import { parseDelay } from './utils/delay.js';
 import groups from './../groups.json' with { type: 'json' };
+import chatGroups from "./../chatbot_group.json" with { type: 'json' }
 import * as groupUtil from './utils/group.js';
+import * as chatGroupUtil from './utils/chatGroup.js';
 import SCHEMAS_VALIDATIONS from './schemas-validation.js';
 import z from 'zod';
 
+
 const groupsAllowed: { [key: string]: boolean } = {};
+const chatGroupsAllowed: { [key: string]: boolean } = {};
+
 groups.forEach((group: string) => {
 	groupsAllowed[`${group}`] = true;
+});
+chatGroups.forEach((group: {[key: string]: any }) => {
+	chatGroupsAllowed[`${group.name}`] = true;
 });
 
 export { Queue };
@@ -43,6 +51,7 @@ function getQueueInstance(c: Context, groupId?: string) {
 }
 
 app.post('/publish', async (c) => {
+	console.log(c.req.query())
 	const url = c.req.query('url');
 	const queueType = c.req.query("queueType")
 	const payload = await c.req.json();
@@ -103,24 +112,83 @@ app.post('/publish', async (c) => {
 	const id = await hasher.get(jsonString);
 
 	if (queueType == "chatQueue") {
-
-		if (!payload.sessionId) {
-			return c.json({ message: 'sessionId is required' }, 400);
-		}
-
-		if (!payload.message) {
-			return c.json({ message: 'message is required' }, 400);
-		}
-
-		console.log(payload)
-
 		const storedMessage = await queueStub.addInChatQueue(
-			id, url as string, payload, payload.sessionId, 
+			id, url as string, payload,
 			visibilityAt);
 		return c.json({ storedMessage: storedMessage });
 	}
 
+	const storedMessage = await queueStub.add(id, url as string, payload, visibilityAt);
+	return c.json({ storedMessage: storedMessage });
+});
 
+app.post('/publish-chat-queue', async (c) => {
+	console.log(c.req.query())
+	const url = c.req.query('url');
+	const queueType = c.req.query("queueType")
+	const payload = await c.req.json();
+
+	if (!url) {
+		return c.json({ message: 'Url is required' }, 404);
+	}
+
+	let groupId = c.req.query('groupId');
+	if (!groupsAllowed[groupUtil.get(groupId)]) {
+		return c.json({ message: 'Group id not found' }, 404);
+	}
+
+	const queueStub = getQueueInstance(c, groupUtil.get(groupId));
+	if (queueStub === null) {
+		return c.json({ message: 'Queue not found' }, 500);
+	}
+
+	let visibilityAt = 0;
+	try {
+		const delay = c.req.query('delay');
+		if (delay) {
+			const result = parseDelay(delay);
+			if (!result.success) {
+				if (result.error === 'INVALID_FORMAT') {
+					throw new Error('Invalid delay format. Valid formats: 1s, 30s, 1m, 30m, 1h');
+				}
+				throw new Error('Maximum delay is 24 hours');
+			}
+			visibilityAt = result.visibilityAt;
+		}
+
+		const schema = SCHEMAS_VALIDATIONS[groupUtil.get(groupId)];
+		if (schema) {
+			schema.parse(payload);
+		}
+	} catch (error: any) {
+		if (error instanceof z.ZodError) {
+			return c.json(
+				{
+					message: 'Validation failed',
+					error: JSON.parse(error.message),
+				},
+				400,
+			);
+		}
+
+		return c.json(
+			{
+				message: error.message,
+				error: error.message,
+			},
+			400,
+		);
+	}
+
+	const jsonString = JSON.stringify(payload);
+	const id = await hasher.get(jsonString);
+
+	if (queueType == "chatQueue") {
+		const storedMessage = await queueStub.addInChatQueue(
+			id, url as string, payload,
+			visibilityAt);
+		return c.json({ storedMessage: storedMessage });
+	}
 
 	const storedMessage = await queueStub.add(id, url as string, payload, visibilityAt);
 	return c.json({ storedMessage: storedMessage });
@@ -142,11 +210,9 @@ app.get('/process', async (c) => {
 	return c.json({ ok: true });
 });
 
-
-
 app.get('/process-chat-queue', async (c) => {
 	let groupId = c.req.query('groupId');
-	if (!groupsAllowed[groupUtil.get(groupId)]) {
+	if (!groupsAllowed[chatGroupUtil.get(groupId)]) {
 		return c.json({ message: 'Group id not found' }, 404);
 	}
 
@@ -172,6 +238,25 @@ app.get('/stats', async (c) => {
 	}
 
 	const stats = await queueStub.getStats();
+	return c.json(stats);
+});
+
+
+app.get('/stats-chat-queue', async (c) => {
+	let groupId = c.req.query('groupId');
+	if (!chatGroupsAllowed[chatGroupUtil.get(groupId)]) {
+		return c.json({ message: 'Group id not found' }, 404);
+	}
+	
+	console.log("groupId =>", groupId)
+	console.log(chatGroupUtil.get(groupId))
+
+	const queueStub = getQueueInstance(c, chatGroupUtil.get(groupId));
+	if (queueStub === null) {
+		return c.json({ message: 'Durable Object not found' }, 500);
+	}
+
+	const stats = await queueStub.getStatsChatQueue();
 	return c.json(stats);
 });
 
@@ -391,6 +476,233 @@ app.get('/dashboard', async (c) => {
 	}
 
 	const html = getHTML('Dashboard', content);
+	return new Response(html, {
+		headers: {
+			'content-type': 'text/html;charset=UTF-8',
+		},
+	});
+});
+
+app.get('/dashboard-chat-queue', async (c) => {
+	const groupId = chatGroupUtil.get(c.req.query('groupId'));
+	if (!chatGroupsAllowed[groupId]) {
+		return c.json({ message: 'Group id not found' }, 404);
+	}
+
+	const queueStub = getQueueInstance(c, groupId);
+	if (queueStub === null) {
+		return c.json({ message: 'Durable Object not found' }, 500);
+	}
+
+	const apiKey = c.req.header('x-api-key') || c.req.query('x-api-key');
+	const tab = c.req.query('tab') || 'overview';
+	const page = parseInt(c.req.query('page') || '1');
+	const limit = 10;
+	const offset = (page - 1) * limit;
+
+	const stats = await queueStub.getStatsChatQueue();
+	const consumerStats = (c.env as Env).ENABLE_CONTROL_CONCURRENCY ? await queueStub.getConsumerStats() : null;
+	const selectOptions = chatGroups.map((g) => `<option value="${g.name}" ${g.name === groupId ? 'selected' : ''}>${g.name}</option>`).join('');
+
+	let content = '';
+	let basedLink = `/dashboard-chat-queue?x-api-key=${apiKey}&groupId=${groupId}`;
+	if (tab === 'messages') {
+		const messages = await queueStub.getMessagesChatQueue(limit, offset);
+		const totalMessagesRaw = await queueStub.getTotalMessagesChatQueue();
+		const totalMessages = Number(totalMessagesRaw) || 0;
+		const totalPages = Math.ceil(totalMessages / limit);
+
+		const messageRows = messages
+			.map((msg) => {
+				const createdAt = new Date(Number(msg.created_at)).toLocaleString();
+				const payloadStr = String(msg.payload || '');
+				const payloadTruncated = payloadStr.length > 100 ? payloadStr.substring(0, 100) + '...' : payloadStr;
+				const statusText = Number(msg.status) === 0 ? 'Pending' : Number(msg.status) === 1 ? 'Processing' : 'Unknown';
+				return `
+				<tr>
+					<td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${msg.id}</td>
+					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${msg.url}</td>
+					<td class="px-6 py-4 text-sm text-gray-500">${payloadTruncated}</td>
+					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${createdAt}</td>
+					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${statusText}</td>
+					<td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">${msg.retries}</td>
+				</tr>
+			`;
+			})
+			.join('');
+
+		const pagination = [];
+		if (page > 1) {
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${page - 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-l-md hover:bg-gray-50">Previous</a>`,
+			);
+		}
+		for (let i = Math.max(1, page - 2); i <= Math.min(totalPages, page + 2); i++) {
+			const activeClass =
+				i === page ? 'bg-indigo-50 border-indigo-500 text-indigo-600' : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50';
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${i}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium ${activeClass} border">${i}</a>`,
+			);
+		}
+		if (page < totalPages) {
+			pagination.push(
+				`<a href="${basedLink}&tab=messages&page=${page + 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-r-md hover:bg-gray-50">Next</a>`,
+			);
+		}
+
+		content = `
+			<div class="px-4 py-0 sm:px-0">
+				<!-- Group Selector -->
+				<div class="mb-6">
+					<label for="groupSelect" class="block text-sm font-medium text-gray-700">Select Group</label>
+					<select id="groupSelect" onchange="window.location.href='/dashboard-chat-queue?x-api-key=${apiKey}&groupId=' + this.value + '&tab=messages'" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md">
+						${selectOptions}
+					</select>
+				</div>
+
+				<!-- Tab Navigation -->
+				<div class="mb-6">
+					<div class="border-b border-gray-200">
+						<nav class="-mb-px flex space-x-8" aria-label="Tabs">
+							<a href="${basedLink}" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Overview
+							</a>
+							<a href="${basedLink}&tab=messages" class="border-indigo-500 text-indigo-600 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Messages
+							</a>
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY
+				? `
+							<a href="/consumers?x-api-key=${apiKey}&groupId=${groupId}" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Consumers
+							</a>
+							`
+				: ''
+			}
+						</nav>
+					</div>
+				</div>
+
+				<div class="mb-6">
+					<div class="bg-white shadow overflow-hidden sm:rounded-md">
+						<div class="px-4 py-5 sm:px-6">
+							<h3 class="text-lg leading-6 font-medium text-gray-900">Messages (${totalMessages})</h3>
+						</div>
+						<div class="overflow-x-auto">
+							<table class="min-w-full divide-y divide-gray-200">
+								<thead class="bg-gray-50">
+									<tr>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">URL</th>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Payload</th>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created At</th>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+										<th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Retries</th>
+									</tr>
+								</thead>
+								<tbody class="bg-white divide-y divide-gray-200">
+									${messageRows}
+								</tbody>
+							</table>
+						</div>
+						<div class="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+							<div class="flex-1 flex justify-between sm:hidden">
+								${page > 1 ? `<a href="${basedLink}&tab=messages&page=${page - 1}" class="relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50">Previous</a>` : ''}
+								${page < totalPages ? `<a href="${basedLink}&tab=messages&page=${page + 1}" class="ml-3 relative inline-flex items-center px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50">Next</a>` : ''}
+							</div>
+							<div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+								<div>
+									<p class="text-sm text-gray-700">
+										Showing <span class="font-medium">${offset + 1}</span> to <span class="font-medium">${Math.min(offset + limit, totalMessages)}</span> of <span class="font-medium">${totalMessages}</span> results
+									</p>
+								</div>
+								<div>
+									<nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+										${pagination.join('')}
+									</nav>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
+	} else {
+		content = `
+			<div class="px-4 py-0 sm:px-0">
+				<!-- Group Selector -->
+				<div class="mb-6">
+					<label for="groupSelect" class="block text-sm font-medium text-gray-700">Select Group</label>
+					<select id="groupSelect" onchange="window.location.href='/dashboard-chat-queue?x-api-key=${apiKey}&groupId=' + this.value" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md">
+						${selectOptions}
+					</select>
+				</div>
+
+				<!-- Tab Navigation -->
+				<div class="mb-6">
+					<div class="border-b border-gray-200">
+						<nav class="-mb-px flex space-x-8" aria-label="Tabs">
+							<a href="${basedLink}" class="border-indigo-500 text-indigo-600 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Overview
+							</a>
+							<a href="${basedLink}&tab=messages" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Messages
+							</a>
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY
+				? `
+							<a href="/consumers?x-api-key=${apiKey}&groupId=${groupId}" class="border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm">
+								Consumers
+							</a>
+							`
+				: ''
+			}
+						</nav>
+					</div>
+				</div>
+
+				<div class="mb-6">
+					<div class="bg-white shadow rounded-lg p-6">
+						<div class="grid grid-cols-2 gap-4 sm:grid-cols-4 ${(c.env as Env).ENABLE_CONTROL_CONCURRENCY ? 'lg:grid-cols-7' : 'lg:grid-cols-4'}">
+							<div class="text-center">
+								<div class="text-2xl font-bold text-blue-600">${stats.totalMessagesDql}</div>
+								<div class="text-sm text-gray-500">Total of message on dead letter queue</div>
+							</div>
+							<div class="text-center">
+								<div class="text-2xl font-bold text-yellow-600">${stats.totalMessagesPending}</div>
+								<div class="text-sm text-gray-500">Total messages pending</div>
+							</div>
+							<div class="text-center">
+								<div class="text-2xl font-bold text-purple-600">${stats.totalMessagesProcessing}</div>
+								<div class="text-sm text-gray-500">Total messages processing</div>
+							</div>
+							<div class="text-center">
+								<div class="text-2xl font-bold text-green-600">${stats.totalMessagesWaitingRetry}</div>
+								<div class="text-sm text-gray-500">Total message waiting to retry</div>
+							</div>
+							${(c.env as Env).ENABLE_CONTROL_CONCURRENCY && consumerStats
+				? `
+							<div class="text-center">
+								<div class="text-2xl font-bold text-indigo-600">${consumerStats.waiting}</div>
+								<div class="text-sm text-gray-500">Waiting consumers</div>
+							</div>
+							<div class="text-center">
+								<div class="text-2xl font-bold text-orange-600">${consumerStats.working}</div>
+								<div class="text-sm text-gray-500">Working consumers</div>
+							</div>
+							<div class="text-center">
+								<div class="text-2xl font-bold text-red-600">${consumerStats.expired}</div>
+								<div class="text-sm text-gray-500">Expired consumers</div>
+							</div>
+							`
+				: ''
+			}
+						</div>
+					</div>
+				</div>
+			</div>
+		`;
+	}
+
+	const html = getHTML('Dashboard Chat Queue', content);
 	return new Response(html, {
 		headers: {
 			'content-type': 'text/html;charset=UTF-8',
@@ -659,5 +971,44 @@ app.post('/consumer-is-ready-process-next-message', async (c) => {
 
 	return c.json({ ok: true, message: 'Consumer marked as WAITING' });
 });
+
+
+app.get("/test", async (c) => {
+	const jsonFake = {
+		"update_id": 876543210,
+		"message": {
+			"message_id": 142,
+			"from": {
+				"id": 123456789,
+				"is_bot": false,
+				"first_name": "John",
+				"last_name": "Doe",
+				"username": "johndoe",
+				"language_code": "en"
+			},
+			"chat": {
+				"id": 123456789,
+				"first_name": "John",
+				"last_name": "Doe",
+				"username": "johndoe",
+				"type": "private"
+			},
+			"date": 1787092800,
+			"text": "Hello, bot! How are you?"
+		}
+	}
+
+	const config = {
+		"name": "DEFAULT",
+		"messageKey": "message.text",
+		"sessionIdKey": "message.chat.id",
+		"intervalBeforeProcessInSecond": 20
+	}
+
+	console.log(_.get(jsonFake, config.messageKey));
+	console.log(_.get(jsonFake, config.sessionIdKey));
+
+	return c.json({ ok: true, message: 'Test endpoint' })
+})
 
 export default app;

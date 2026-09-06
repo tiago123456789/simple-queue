@@ -4,6 +4,7 @@ import STATUS from '../types/status.js';
 import { Consumer } from '../types/consumer.js';
 import { DurableObject } from 'cloudflare:workers';
 import groups from './../../chatbot_group.json' with { type: 'json' };
+import _ from "lodash"
 
 export interface Env {
 	QUEUE: DurableObjectNamespace<Queue>;
@@ -64,7 +65,10 @@ export class Queue extends DurableObject {
 		const sqlInstructions = [
 			`ALTER TABLE queue ADD COLUMN visibility_at INTEGER DEFAULT 0;`,
 			`ALTER TABLE queue ADD COLUMN updated_at INTEGER;`,
-			`ALTER TABLE queue ADD COLUMN session_id TEXT;`
+			`ALTER TABLE queue ADD COLUMN session_id TEXT;`,
+			`ALTER TABLE queue_dlq ADD COLUMN visibility_at INTEGER DEFAULT 0;`,
+			`ALTER TABLE queue_dlq ADD COLUMN updated_at INTEGER;`,
+			`ALTER TABLE queue_dlq ADD COLUMN session_id TEXT;`
 		]
 
 		for (let index = 0; index < sqlInstructions.length; index += 1) {
@@ -378,7 +382,6 @@ export class Queue extends DurableObject {
 		}
 
 		const messages = await this.getNextFromChatQueue(limitPerTime);
-		console.log(messages)
 		if (messages.length === 0) {
 			return Promise.resolve();
 		}
@@ -460,8 +463,6 @@ export class Queue extends DurableObject {
 		const diffMs = currentTime.getTime() - updatedAt.getTime();
 		const diffSeconds = diffMs / 1000;
 
-		console.log(diffSeconds, queue)
-		console.log(diffSeconds < queue.intervalBeforeProcessInSecond)
 		if (diffSeconds < queue.intervalBeforeProcessInSecond) {
 			return { id: items[0].id as string, payload: JSON.parse(items[0].payload) };
 		}
@@ -473,16 +474,21 @@ export class Queue extends DurableObject {
 		id: string,
 		url: string,
 		payload: { [key: string]: any },
-		sessionId: string,
 		visibilityAt: number = 0,
 	): Promise<boolean> {
+		const info = this.getInfo()
+
 		try {
+			const sessionId: string = _.get(payload, info?.sessionIdKey as string)
 			const existing = await this.getMessageBySessionIdInsideTimeWindown(sessionId, 1);
 			if (existing) {
 				const itemPayload = { ...(existing.payload) };
-				itemPayload.message += `\n ${payload.message}`;
-				console.log(itemPayload)
-				console.log("add message to message item already exists")
+				_.set(
+					itemPayload,
+					info?.messageKey as string,
+					`${_.get(itemPayload, info?.messageKey as string)}\n${_.get(payload, info?.messageKey as string)}`
+				)
+
 				await this.ctx.storage.sql.exec(
 					`UPDATE queue SET updated_at = ?, payload = ? WHERE id = ?`,
 					...[Date.now(), JSON.stringify(itemPayload), existing.id],
@@ -525,18 +531,18 @@ export class Queue extends DurableObject {
 	}
 
 	async getStats() {
-		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq;`);
+		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq where session_id IS NULL;`);
 		const totalMessagesPending = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where status = ? AND retries = 0;`,
+			`SELECT count(id) as total FROM queue where status = ? AND retries = 0 and session_id IS NULL;`,
 			...[STATUS.PENDING],
 		);
 		const totalMessagesProcessing = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where status = ?;`,
+			`SELECT count(id) as total FROM queue where status = ? and session_id IS NULL;`,
 			...[STATUS.PROCESSING],
 		);
 
 		const totalMessagesWaitingRetry = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where retries > 0 and status = ?;`,
+			`SELECT count(id) as total FROM queue where retries > 0 and status = ? and session_id IS NULL;`,
 			...[STATUS.PENDING],
 		);
 
@@ -546,5 +552,51 @@ export class Queue extends DurableObject {
 			totalMessagesProcessing: totalMessagesProcessing.toArray()[0].total,
 			totalMessagesWaitingRetry: totalMessagesWaitingRetry.toArray()[0].total,
 		};
+	}
+
+	async getStatsChatQueue() {
+		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq where session_id IS NOT NULL;`);
+		const totalMessagesPending = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where status = ? AND retries = 0 AND session_id IS NOT NULL;`,
+			...[STATUS.PENDING],
+		);
+		const totalMessagesProcessing = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where status = ? AND session_id IS NOT NULL;`,
+			...[STATUS.PROCESSING],
+		);
+
+		const totalMessagesWaitingRetry = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where retries > 0 and status = ? AND session_id IS NOT NULL;`,
+			...[STATUS.PENDING],
+		);
+
+		return {
+			totalMessagesDql: totalMessagesDql.toArray()[0].total,
+			totalMessagesPending: totalMessagesPending.toArray()[0].total,
+			totalMessagesProcessing: totalMessagesProcessing.toArray()[0].total,
+			totalMessagesWaitingRetry: totalMessagesWaitingRetry.toArray()[0].total,
+		};
+	}
+
+	async getMessagesChatQueue(limit: number = 10, offset: number = 0) {
+		const results = await this.ctx.storage.sql.exec(
+			`SELECT id, url, payload, created_at, status, retries FROM queue WHERE session_id IS NOT NULL ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+			...[limit, offset],
+		);
+
+		const items = results.toArray();
+		return items.map((item) => ({
+			id: item.id,
+			url: item.url,
+			payload: item.payload,
+			created_at: item.created_at,
+			status: item.status,
+			retries: item.retries,
+		}));
+	}
+
+	async getTotalMessagesChatQueue() {
+		const result = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue WHERE session_id IS NOT NULL;`);
+		return result.toArray()[0].total;
 	}
 }

@@ -1,0 +1,6 @@
+[{ 
+    "name": "DEFAULT", 
+    "messageKey": "message.text", 
+    "sessionIdKey": "message.chat.id", 
+    "intervalBeforeProcessInSecond": 15 
+}]
