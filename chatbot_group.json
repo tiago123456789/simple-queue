@@ -2,5 +2,10 @@
     "name": "DEFAULT", 
     "messageKey": "message.text", 
     "sessionIdKey": "message.chat.id", 
-    "intervalBeforeProcessInSecond": 15 
+    "intervalBeforeProcessInSecond": 15,
+    "condition": {
+        "key": "message.text",
+        "operator": "exists",
+        "value": ""
+    }
 }]

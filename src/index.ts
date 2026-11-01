@@ -114,7 +114,7 @@ app.post('/publish', async (c) => {
 	if (queueType == "chatQueue") {
 		const storedMessage = await queueStub.addInChatQueue(
 			id, url as string, payload,
-			visibilityAt);
+			visibilityAt, groupUtil.get(groupId));
 		return c.json({ storedMessage: storedMessage });
 	}
 
@@ -186,7 +186,7 @@ app.post('/publish-chat-queue', async (c) => {
 	if (queueType == "chatQueue") {
 		const storedMessage = await queueStub.addInChatQueue(
 			id, url as string, payload,
-			visibilityAt);
+			visibilityAt, groupUtil.get(groupId));
 		return c.json({ storedMessage: storedMessage });
 	}
 

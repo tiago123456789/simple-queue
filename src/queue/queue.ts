@@ -21,6 +21,12 @@ const CONSUMER_STATUS = {
 	WORKING: 'WORKING',
 } as const;
 
+type ChatCondition = {
+	key: string;
+	operator: string;
+	value?: unknown;
+};
+
 export class Queue extends DurableObject {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
@@ -258,8 +264,8 @@ export class Queue extends DurableObject {
 		});
 	}
 
-	private async getNextFromChatQueue(limit: number = 1): Promise<Array<Message>> {
-		const queue = this.getInfo()
+	private async getNextFromChatQueue(limit: number = 1, groupId?: string): Promise<Array<Message>> {
+		const queue = this.getInfo(groupId)
 		if (!queue) {
 			return [];
 		}
@@ -356,7 +362,7 @@ export class Queue extends DurableObject {
 				return Promise.resolve();
 			}
 
-			const messages = await this.getNextFromChatQueue(consumerStats.waiting);
+			const messages = await this.getNextFromChatQueue(consumerStats.waiting, groupId);
 			if (messages.length === 0) {
 				return Promise.resolve();
 			}
@@ -381,7 +387,7 @@ export class Queue extends DurableObject {
 			return Promise.resolve();
 		}
 
-		const messages = await this.getNextFromChatQueue(limitPerTime);
+		const messages = await this.getNextFromChatQueue(limitPerTime, groupId);
 		if (messages.length === 0) {
 			return Promise.resolve();
 		}
@@ -434,40 +440,64 @@ export class Queue extends DurableObject {
 		}
 	}
 
-	getInfo() {
-		const id = this.ctx.id.name;
+	getInfo(groupId?: string) {
+		const id = groupId || this.ctx.id.name;
 		return groups.find((group) => group.name === id) || null;
 	}
 
 	private async getMessageBySessionIdInsideTimeWindown(
 		sessionId: string,
-		limit: number = 1
+		messageKey: string,
+		groupId?: string,
 	): Promise<null | { id: string, payload: { [key: string]: any } }> {
 		const results = await this.ctx.storage.sql.exec(
-			`SELECT id, payload, updated_at FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) AND session_id = ? ORDER BY updated_at DESC LIMIT ?`,
-			...[STATUS.PENDING, Date.now(), sessionId, limit],
+			`SELECT id, payload, updated_at FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) AND session_id = ? ORDER BY updated_at DESC`,
+			...[STATUS.PENDING, Date.now(), sessionId],
 		);
 
 		const items = results.toArray();
-		if (!items[0]) {
-			return null;
-		}
-
-		const queue = this.getInfo()
+		const queue = this.getInfo(groupId)
 		if (!queue) {
 			return null;
 		}
-		// @ts-ignore
-		const updatedAt = new Date(items[0].updated_at);
-		const currentTime = new Date();
-		const diffMs = currentTime.getTime() - updatedAt.getTime();
-		const diffSeconds = diffMs / 1000;
 
-		if (diffSeconds < queue.intervalBeforeProcessInSecond) {
-			return { id: items[0].id as string, payload: JSON.parse(items[0].payload) };
+		const currentTime = Date.now();
+		for (const item of items) {
+			const payload = JSON.parse(String(item.payload));
+			const message = _.get(payload, messageKey);
+			if (typeof message !== 'string' || message.length === 0) {
+				continue;
+			}
+
+			const updatedAt = Number(item.updated_at);
+			const diffSeconds = (currentTime - updatedAt) / 1000;
+			if (diffSeconds < queue.intervalBeforeProcessInSecond) {
+				return { id: String(item.id), payload };
+			}
 		}
 
 		return null;
+	}
+
+	private isConditionTrue(payload: { [key: string]: any }, condition?: ChatCondition): boolean {
+		if (!condition) {
+			return true;
+		}
+
+		const value = _.get(payload, condition.key);
+		switch (condition.operator) {
+			case 'exists':
+				return Boolean(value);
+			case 'contains':
+				if (typeof value === 'string' && typeof condition.value === 'string') {
+					return value.includes(condition.value);
+				}
+				return Array.isArray(value) && value.includes(condition.value);
+			case 'equal':
+				return value === condition.value;
+			default:
+				return false;
+		}
 	}
 
 	async addInChatQueue(
@@ -475,18 +505,24 @@ export class Queue extends DurableObject {
 		url: string,
 		payload: { [key: string]: any },
 		visibilityAt: number = 0,
+		groupId?: string,
 	): Promise<boolean> {
-		const info = this.getInfo()
+		const info = this.getInfo(groupId)
 
 		try {
 			const sessionId: string = _.get(payload, info?.sessionIdKey as string)
-			const existing = await this.getMessageBySessionIdInsideTimeWindown(sessionId, 1);
-			if (existing) {
+			const messageKey = info?.messageKey as string;
+			const incomingMessage = _.get(payload, messageKey);
+			const shouldAppend = this.isConditionTrue(payload, info?.condition);
+			const existing = shouldAppend && typeof incomingMessage === 'string' && incomingMessage.length > 0
+				? await this.getMessageBySessionIdInsideTimeWindown(sessionId, messageKey, groupId)
+				: null;
+			if (existing && typeof incomingMessage === 'string') {
 				const itemPayload = { ...(existing.payload) };
 				_.set(
 					itemPayload,
-					info?.messageKey as string,
-					`${_.get(itemPayload, info?.messageKey as string)}\n${_.get(payload, info?.messageKey as string)}`
+					messageKey,
+					`${_.get(itemPayload, messageKey)}\n${incomingMessage}`
 				)
 
 				await this.ctx.storage.sql.exec(

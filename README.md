@@ -132,10 +132,17 @@ The Chat Queue is a special mode designed for chatbot workloads (e.g., Telegram 
 ### How It Works
 
 1. **Publish**: A message arrives (e.g., via a Telegram webhook). The `sessionIdKey` config extracts the session ID from the payload.
-2. **Coalesce**: If a pending message from the same session already exists inside the time window, the new message text is appended to the existing payload at the `messageKey` path (joined with `\n`) and the entry is updated. Otherwise a new message is enqueued with its `session_id` and `updated_at` set.
+2. **Coalesce**: When the configured condition matches an incoming payload, its message text is appended to a compatible pending text message from the same session inside the time window (joined with `\n`). If the condition does not match, or there is no compatible message to append to, the complete payload is enqueued as a separate chat message. For example, a Telegram audio update without `message.text` stays a separate entry with its audio fields intact.
 3. **Process**: The scheduler calls `/process-chat-queue`. Only messages whose `updated_at` is older than `intervalBeforeProcessInSecond` are delivered, so the same session is processed at most once per interval.
 
-### Configuring Chat Groups
+### HOW TO SETUP THE CHAT QUEUE
+
+1. **Configure your API key and env vars**: set `API_KEY` (and optionally the others) in `wrangler.jsonc`. See [Environment Variables](#environment-variables).
+2. **Register the group in `groups.json`**: add the group name as a plain string (e.g., `"chatbot_queue"`). (Use simple names without special characters.)
+3. **Register the group in `chatbot_group.json`**: add the same group name with its chat config — see [Configuring Chat Groups](#configuring-chat-groups) below.
+4. **Run it**: `npm run dev` for local testing, or `npm run deploy` to deploy to Cloudflare.
+
+#### Configuring Chat Groups
 
 Chat groups are configured in `chatbot_group.json`:
 
@@ -145,7 +152,12 @@ Chat groups are configured in `chatbot_group.json`:
     "name": "DEFAULT",
     "messageKey": "message.text",
     "sessionIdKey": "message.chat.id",
-    "intervalBeforeProcessInSecond": 15
+    "intervalBeforeProcessInSecond": 15,
+    "condition": {
+      "key": "message.text",
+      "operator": "exists",
+      "value": ""
+    }
   }
 ]
 ```
@@ -156,10 +168,38 @@ Chat groups are configured in `chatbot_group.json`:
 | `messageKey` | Dot-path in the payload where the user's message text lives |
 | `sessionIdKey` | Dot-path in the payload that identifies the chat session/user |
 | `intervalBeforeProcessInSecond` | Minimum seconds between deliveries for the same session |
+| `condition` | Optional rule evaluated against each incoming payload to decide whether to append its message text or enqueue the full payload separately |
+| `condition.key` | Dot-path in the incoming payload to check |
+| `condition.operator` | `exists` (truthy value), `contains` (string or array inclusion), or `equal` (strict equality) |
+| `condition.value` | Comparison value for `contains` and `equal`; unused by `exists` |
 
 > **Important**: For a chat group to work with every endpoint, the group name must be registered in **both** files: `groups.json` (as a plain string) **and** `chatbot_group.json` (with its chat config). `/publish` validates against `groups.json`, while `/process-chat-queue`, `/stats-chat-queue` and `/dashboard-chat-queue` validate against `chatbot_group.json`.
 
-### Setting Up the Telegram Webhook
+### HOW TO PUBLISH A MESSAGE ON THE CHAT QUEUE
+
+Publish any chat payload with `queueType=chatQueue`:
+
+```bash
+curl --request POST \
+  --url 'SIMPLE_QUEUE_URL_HERE/publish?queueType=chatQueue&url=URL_RECEIVE_MESSAGE&groupId=DEFAULT' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: api_key_here' \
+  --data '{
+	"message": {
+		"chat": { "id": 123456789 },
+		"text": "Hello from the chat queue!"
+	}
+}'
+```
+
+- The payload shape must match the `sessionIdKey` and `messageKey` dot-paths of your chat group (e.g., `message.chat.id` and `message.text`).
+- `groupId` is optional and defaults to `DEFAULT`. It must be registered in `groups.json`.
+- `url` is the destination that receives the (coalesced) message payload.
+- `delay` is optional — see [How To Set Message Delay](#how-to-set-message-delay).
+- Response: `{"storedMessage": true}` on success, `{"storedMessage": false}` if the message could not be stored.
+- Alternative endpoint: `POST /publish-chat-queue?url=...&groupId=...` (same behavior, no `queueType` needed).
+
+#### Setting Up the Telegram Webhook
 
 Point your Telegram bot's webhook to the queue so incoming messages are fed straight into the chat queue:
 
@@ -179,7 +219,23 @@ curl -X POST "https://api.telegram.org/botYOUR_BOT_TOKEN/setWebhook" \
 - `groupId` is optional and defaults to `DEFAULT`. Use it to target a specific chat group.
 - Telegram requires an HTTPS webhook URL (e.g., use ngrok for local testing).
 
-### Scheduling the Processing
+### HOW TO CONSUME MESSAGES FROM THE CHAT QUEUE
+
+Consuming is scheduler-driven: an external cron (e.g., Supabase) calls `/process-chat-queue`, and the queue POSTs each due message to its `url` destination.
+
+```bash
+curl --request GET \
+  --url 'SIMPLE_QUEUE_URL_HERE/process-chat-queue?groupId=DEFAULT' \
+  --header 'x-api-key: api_key_here'
+```
+
+- Response: `{"ok": true}`. Messages are delivered asynchronously right after the response.
+- Only messages whose `updated_at` is older than `intervalBeforeProcessInSecond` are picked up (per-session rate limiting).
+- Batch size per call is `TOTAL_MESSAGES_PULL_PER_TIME`.
+- Your destination receives a `POST` with headers `User-Agent: SimpleQueue`, `x-api-key`, `Content-Type: application/json` and `group-id` (plus `consumer-id` when [concurrency control](#consumer-based-concurrency-control) is enabled).
+- Failed deliveries are retried up to `TOTAL_RETRIES_BEFORE_DQL` times, then moved to the dead-letter queue.
+
+#### Scheduling the Processing
 
 Create a Supabase cron job that triggers `/process-chat-queue` every few seconds:
 

@@ -146,7 +146,14 @@ A Fila de Chat é um modo especial projetado para cargas de trabalho de chatbots
 2. **Coalesça**: Se já existe uma mensagem pendente da mesma sessão dentro da janela de tempo, o texto da nova mensagem é acrescentado ao payload existente no caminho `messageKey` (juntado com `\n`) e o registro é atualizado. Caso contrário, uma nova mensagem é enfileirada com `session_id` e `updated_at` definidos.
 3. **Processe**: O agendador chama `/process-chat-queue`. Apenas mensagens cujo `updated_at` é mais antigo que `intervalBeforeProcessInSecond` são entregues, então a mesma sessão é processada no máximo uma vez por intervalo.
 
-### Configurando Grupos de Chat
+### COMO CONFIGURAR A FILA DE CHAT
+
+1. **Configure sua chave de API e variáveis de ambiente**: defina `API_KEY` (e opcionalmente as demais) em `wrangler.jsonc`. Veja [Variáveis de Ambiente](#variáveis-de-ambiente).
+2. **Registre o grupo em `groups.json`**: adicione o nome do grupo como uma string simples (ex.: `"chatbot_queue"`). (Use nomes simples, sem caracteres especiais.)
+3. **Registre o grupo em `chatbot_group.json`**: adicione o mesmo nome de grupo com sua configuração de chat — veja [Configurando Grupos de Chat](#configurando-grupos-de-chat) abaixo.
+4. **Execute**: `npm run dev` para testar localmente, ou `npm run deploy` para implantar no Cloudflare.
+
+#### Configurando Grupos de Chat
 
 Os grupos de chat são configurados em `chatbot_group.json`:
 
@@ -156,7 +163,12 @@ Os grupos de chat são configurados em `chatbot_group.json`:
     "name": "DEFAULT",
     "messageKey": "message.text",
     "sessionIdKey": "message.chat.id",
-    "intervalBeforeProcessInSecond": 15
+    "intervalBeforeProcessInSecond": 15,
+    "condition": {
+      "key": "message.text",
+      "operator": "exists",
+      "value": ""
+    }
   }
 ]
 ```
@@ -167,10 +179,38 @@ Os grupos de chat são configurados em `chatbot_group.json`:
 | `messageKey` | Caminho com pontos no payload onde está o texto da mensagem do usuário |
 | `sessionIdKey` | Caminho com pontos no payload que identifica a sessão/usuário do chat |
 | `intervalBeforeProcessInSecond` | Segundos mínimos entre entregas para a mesma sessão |
+| `condition` | Regra opcional avaliada em cada payload recebido para decidir se o texto da mensagem é acrescentado ou se o payload completo é enfileirado separadamente |
+| `condition.key` | Caminho com pontos no payload recebido a verificar |
+| `condition.operator` | `exists` (valor truthy), `contains` (inclusão em string ou array) ou `equal` (igualdade estrita) |
+| `condition.value` | Valor de comparação para `contains` e `equal`; não é usado por `exists` |
 
 > **Importante**: Para um grupo de chat funcionar em todos os endpoints, o nome do grupo deve ser registrado em **ambos** os arquivos: `groups.json` (como uma string simples) **e** `chatbot_group.json` (com sua configuração de chat). O `/publish` valida contra `groups.json`, enquanto `/process-chat-queue`, `/stats-chat-queue` e `/dashboard-chat-queue` validam contra `chatbot_group.json`.
 
-### Configurando o Webhook do Telegram
+### COMO PUBLICAR UMA MENSAGEM NA FILA DE CHAT
+
+Publique qualquer payload de chat com `queueType=chatQueue`:
+
+```bash
+curl --request POST \
+  --url 'SUA_URL_DA_FILA_SIMPLES/publish?queueType=chatQueue&url=SUA_URL_DESTINO&groupId=DEFAULT' \
+  --header 'Content-Type: application/json' \
+  --header 'x-api-key: sua_chave_api_aqui' \
+  --data '{
+	"message": {
+		"chat": { "id": 123456789 },
+		"text": "Olá da fila de chat!"
+	}
+}'
+```
+
+- O formato do payload deve corresponder aos caminhos `sessionIdKey` e `messageKey` do seu grupo de chat (ex.: `message.chat.id` e `message.text`).
+- `groupId` é opcional e o padrão é `DEFAULT`. Ele deve estar registrado em `groups.json`.
+- `url` é o destino que recebe o payload da mensagem (mesclada).
+- `delay` é opcional — veja [Como Definir Atraso na Entrega da Mensagem](#como-definir-atraso-na-entrega-da-mensagem).
+- Resposta: `{"storedMessage": true}` em caso de sucesso, `{"storedMessage": false}` se a mensagem não puder ser armazenada.
+- Endpoint alternativo: `POST /publish-chat-queue?url=...&groupId=...` (mesmo comportamento, sem precisar de `queueType`).
+
+#### Configurando o Webhook do Telegram
 
 Aponte o webhook do seu bot do Telegram para a fila para que as mensagens recebidas sejam alimentadas diretamente na fila de chat:
 
@@ -190,7 +230,23 @@ curl -X POST "https://api.telegram.org/botSEU_TOKEN_DO_BOT/setWebhook" \
 - `groupId` é opcional e o padrão é `DEFAULT`. Use-o para direcionar um grupo de chat específico.
 - O Telegram exige um URL de webhook HTTPS (ex.: use ngrok para testes locais).
 
-### Agendando o Processamento
+### COMO CONSUMIR MENSAGENS DA FILA DE CHAT
+
+O consumo é acionado por um agendador: um cron externo (ex.: Supabase) chama `/process-chat-queue` e a fila envia cada mensagem devida por `POST` para a sua URL de destino.
+
+```bash
+curl --request GET \
+  --url 'SUA_URL_DA_FILA_SIMPLES/process-chat-queue?groupId=DEFAULT' \
+  --header 'x-api-key: sua_chave_api_aqui'
+```
+
+- Resposta: `{"ok": true}`. As mensagens são entregues de forma assíncrona logo após a resposta.
+- Apenas mensagens cujo `updated_at` é mais antigo que `intervalBeforeProcessInSecond` são selecionadas (limitação de taxa por sessão).
+- O tamanho do lote por chamada é `TOTAL_MESSAGES_PULL_PER_TIME`.
+- Seu destino recebe um `POST` com os cabeçalhos `User-Agent: SimpleQueue`, `x-api-key`, `Content-Type: application/json` e `group-id` (mais `consumer-id` quando o [controle de concorrência](#controle-de-concorrência-baseado-em-consumidores) está ativado).
+- Entregas com falha são repetidas até `TOTAL_RETRIES_BEFORE_DQL` vezes e depois movidas para a fila de carta morta.
+
+#### Agendando o Processamento
 
 Crie um trabalho cron no Supabase que aciona `/process-chat-queue` a cada poucos segundos:
 
