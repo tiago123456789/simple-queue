@@ -3,6 +3,8 @@ import Message from '../types/message.js';
 import STATUS from '../types/status.js';
 import { Consumer } from '../types/consumer.js';
 import { DurableObject } from 'cloudflare:workers';
+import groups from './../../chatbot_group.json' with { type: 'json' };
+import _ from "lodash"
 
 export interface Env {
 	QUEUE: DurableObjectNamespace<Queue>;
@@ -18,6 +20,12 @@ const CONSUMER_STATUS = {
 	WAITING: 'WAITING',
 	WORKING: 'WORKING',
 } as const;
+
+type ChatCondition = {
+	key: string;
+	operator: string;
+	value?: unknown;
+};
 
 export class Queue extends DurableObject {
 	constructor(ctx: DurableObjectState, env: Env) {
@@ -59,9 +67,22 @@ export class Queue extends DurableObject {
 			);
 			CREATE INDEX IF NOT EXISTS consumers_idx ON consumers(id);
 		`);
-		try {
-			await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN visibility_at INTEGER DEFAULT 0;`);
-		} catch (e) {}
+
+		const sqlInstructions = [
+			`ALTER TABLE queue ADD COLUMN visibility_at INTEGER DEFAULT 0;`,
+			`ALTER TABLE queue ADD COLUMN updated_at INTEGER;`,
+			`ALTER TABLE queue ADD COLUMN session_id TEXT;`,
+			`ALTER TABLE queue_dlq ADD COLUMN visibility_at INTEGER DEFAULT 0;`,
+			`ALTER TABLE queue_dlq ADD COLUMN updated_at INTEGER;`,
+			`ALTER TABLE queue_dlq ADD COLUMN session_id TEXT;`
+		]
+
+		for (let index = 0; index < sqlInstructions.length; index += 1) {
+			try {
+				await this.ctx.storage.sql.exec(sqlInstructions[index]);
+			} catch (e) {
+			}
+		}
 	}
 
 	private getConsumerExpiryMs(): number {
@@ -223,9 +244,37 @@ export class Queue extends DurableObject {
 	private async getNextFromQueue(limit: number = 1): Promise<Array<Message>> {
 		const results = await this.ctx.storage.sql.exec(
 			`UPDATE queue SET status = ?
-			WHERE id in (SELECT id FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) ORDER BY created_at ASC LIMIT ?)
+			WHERE id in (SELECT id FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) AND session_id IS NULL ORDER BY created_at ASC LIMIT ?)
 			RETURNING id, url, payload, retries;`,
 			...[STATUS.PROCESSING, STATUS.PENDING, Date.now(), limit],
+		);
+
+		const items = results.toArray();
+		if (!items[0]) {
+			return [];
+		}
+
+		return items.map((item) => {
+			return {
+				id: item.id,
+				url: item.url,
+				retries: item.retries,
+				payload: item.payload,
+			} as Message;
+		});
+	}
+
+	private async getNextFromChatQueue(limit: number = 1, groupId?: string): Promise<Array<Message>> {
+		const queue = this.getInfo(groupId)
+		if (!queue) {
+			return [];
+		}
+
+		const results = await this.ctx.storage.sql.exec(
+			`UPDATE queue SET status = ?
+			WHERE id in (SELECT id FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) AND session_id IS NOT NULL and ((unixepoch('now') * 1000) - updated_at) / 1000 > ? ORDER BY created_at ASC LIMIT ?)
+			RETURNING id, url, payload, retries;`,
+			...[STATUS.PROCESSING, STATUS.PENDING, Date.now(), queue.intervalBeforeProcessInSecond, limit],
 		);
 
 		const items = results.toArray();
@@ -305,6 +354,60 @@ export class Queue extends DurableObject {
 		return Promise.resolve();
 	}
 
+	async consumeChatQueue(limitPerTime: number = 1, groupId: string): Promise<void> {
+		if ((this.env as Env).ENABLE_CONTROL_CONCURRENCY) {
+			const consumerStats = await this.getConsumerStats();
+			if (consumerStats.waiting == 0) {
+				console.log('No waiting consumers available, resetting messages to pending');
+				return Promise.resolve();
+			}
+
+			const messages = await this.getNextFromChatQueue(consumerStats.waiting, groupId);
+			if (messages.length === 0) {
+				return Promise.resolve();
+			}
+
+			const consumers = await this.getWaitingConsumers(messages.length);
+			const processCount = Math.min(messages.length, consumers.length);
+			const messagesToProcess = messages.slice(0, processCount);
+			for (let i = 0; i < messagesToProcess.length; i++) {
+				const message = messagesToProcess[i];
+				const consumerId = consumers[i].id;
+
+				if (message.retries > (this.env as Env).TOTAL_RETRIES_BEFORE_DQL) {
+					await this.moveMessageToDlq(message);
+					await this.delete(message.id);
+					await this.markConsumerReady(consumerId);
+				} else {
+					this.processWithoutWaiting(message, consumerId, groupId);
+					await this.delete(message.id);
+				}
+			}
+
+			return Promise.resolve();
+		}
+
+		const messages = await this.getNextFromChatQueue(limitPerTime, groupId);
+		if (messages.length === 0) {
+			return Promise.resolve();
+		}
+
+		let requestTriggerParallel = [];
+		for (let message of messages) {
+			if (message.retries > (this.env as Env).TOTAL_RETRIES_BEFORE_DQL) {
+				console.log('Moving message with id:', message.id, 'because reached the total of retries');
+				await this.moveMessageToDlq(message);
+				await this.delete(message.id);
+			} else {
+				requestTriggerParallel.push(this.process(message, groupId));
+			}
+		}
+
+		await Promise.all(requestTriggerParallel);
+		requestTriggerParallel = [];
+		return Promise.resolve();
+	}
+
 	private processWithoutWaiting(message: Message, consumerId: string, groupId: string) {
 		console.log('Sending message (fire-and-forget):', message.id, 'consumer:', consumerId);
 		axios
@@ -337,6 +440,110 @@ export class Queue extends DurableObject {
 		}
 	}
 
+	getInfo(groupId?: string) {
+		const id = groupId || this.ctx.id.name;
+		return groups.find((group) => group.name === id) || null;
+	}
+
+	private async getMessageBySessionIdInsideTimeWindown(
+		sessionId: string,
+		messageKey: string,
+		groupId?: string,
+	): Promise<null | { id: string, payload: { [key: string]: any } }> {
+		const results = await this.ctx.storage.sql.exec(
+			`SELECT id, payload, updated_at FROM queue WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?) AND session_id = ? ORDER BY updated_at DESC`,
+			...[STATUS.PENDING, Date.now(), sessionId],
+		);
+
+		const items = results.toArray();
+		const queue = this.getInfo(groupId)
+		if (!queue) {
+			return null;
+		}
+
+		const currentTime = Date.now();
+		for (const item of items) {
+			const payload = JSON.parse(String(item.payload));
+			const message = _.get(payload, messageKey);
+			if (typeof message !== 'string' || message.length === 0) {
+				continue;
+			}
+
+			const updatedAt = Number(item.updated_at);
+			const diffSeconds = (currentTime - updatedAt) / 1000;
+			if (diffSeconds < queue.intervalBeforeProcessInSecond) {
+				return { id: String(item.id), payload };
+			}
+		}
+
+		return null;
+	}
+
+	private isConditionTrue(payload: { [key: string]: any }, condition?: ChatCondition): boolean {
+		if (!condition) {
+			return true;
+		}
+
+		const value = _.get(payload, condition.key);
+		switch (condition.operator) {
+			case 'exists':
+				return Boolean(value);
+			case 'contains':
+				if (typeof value === 'string' && typeof condition.value === 'string') {
+					return value.includes(condition.value);
+				}
+				return Array.isArray(value) && value.includes(condition.value);
+			case 'equal':
+				return value === condition.value;
+			default:
+				return false;
+		}
+	}
+
+	async addInChatQueue(
+		id: string,
+		url: string,
+		payload: { [key: string]: any },
+		visibilityAt: number = 0,
+		groupId?: string,
+	): Promise<boolean> {
+		const info = this.getInfo(groupId)
+
+		try {
+			const sessionId: string = _.get(payload, info?.sessionIdKey as string)
+			const messageKey = info?.messageKey as string;
+			const incomingMessage = _.get(payload, messageKey);
+			const shouldAppend = this.isConditionTrue(payload, info?.condition);
+			const existing = shouldAppend && typeof incomingMessage === 'string' && incomingMessage.length > 0
+				? await this.getMessageBySessionIdInsideTimeWindown(sessionId, messageKey, groupId)
+				: null;
+			if (existing && typeof incomingMessage === 'string') {
+				const itemPayload = { ...(existing.payload) };
+				_.set(
+					itemPayload,
+					messageKey,
+					`${_.get(itemPayload, messageKey)}\n${incomingMessage}`
+				)
+
+				await this.ctx.storage.sql.exec(
+					`UPDATE queue SET updated_at = ?, payload = ? WHERE id = ?`,
+					...[Date.now(), JSON.stringify(itemPayload), existing.id],
+				);
+				return true;
+			}
+
+			await this.ctx.storage.sql.exec(
+				`INSERT INTO queue (id, url, payload, created_at, status, visibility_at, session_id, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				...[crypto.randomUUID(), url, JSON.stringify(payload), Date.now(), STATUS.PENDING, visibilityAt, sessionId, Date.now()],
+			);
+			return true;
+		} catch (error) {
+			console.error(error);
+			return Promise.resolve(false);
+		}
+	}
+
 	async getMessages(limit: number = 10, offset: number = 0) {
 		const results = await this.ctx.storage.sql.exec(
 			`SELECT id, url, payload, created_at, status, retries FROM queue ORDER BY created_at ASC LIMIT ? OFFSET ?`,
@@ -360,18 +567,18 @@ export class Queue extends DurableObject {
 	}
 
 	async getStats() {
-		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq;`);
+		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq where session_id IS NULL;`);
 		const totalMessagesPending = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where status = ? AND retries = 0;`,
+			`SELECT count(id) as total FROM queue where status = ? AND retries = 0 and session_id IS NULL;`,
 			...[STATUS.PENDING],
 		);
 		const totalMessagesProcessing = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where status = ?;`,
+			`SELECT count(id) as total FROM queue where status = ? and session_id IS NULL;`,
 			...[STATUS.PROCESSING],
 		);
 
 		const totalMessagesWaitingRetry = await this.ctx.storage.sql.exec(
-			`SELECT count(id) as total FROM queue where retries > 0 and status = ?;`,
+			`SELECT count(id) as total FROM queue where retries > 0 and status = ? and session_id IS NULL;`,
 			...[STATUS.PENDING],
 		);
 
@@ -381,5 +588,51 @@ export class Queue extends DurableObject {
 			totalMessagesProcessing: totalMessagesProcessing.toArray()[0].total,
 			totalMessagesWaitingRetry: totalMessagesWaitingRetry.toArray()[0].total,
 		};
+	}
+
+	async getStatsChatQueue() {
+		const totalMessagesDql = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue_dlq where session_id IS NOT NULL;`);
+		const totalMessagesPending = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where status = ? AND retries = 0 AND session_id IS NOT NULL;`,
+			...[STATUS.PENDING],
+		);
+		const totalMessagesProcessing = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where status = ? AND session_id IS NOT NULL;`,
+			...[STATUS.PROCESSING],
+		);
+
+		const totalMessagesWaitingRetry = await this.ctx.storage.sql.exec(
+			`SELECT count(id) as total FROM queue where retries > 0 and status = ? AND session_id IS NOT NULL;`,
+			...[STATUS.PENDING],
+		);
+
+		return {
+			totalMessagesDql: totalMessagesDql.toArray()[0].total,
+			totalMessagesPending: totalMessagesPending.toArray()[0].total,
+			totalMessagesProcessing: totalMessagesProcessing.toArray()[0].total,
+			totalMessagesWaitingRetry: totalMessagesWaitingRetry.toArray()[0].total,
+		};
+	}
+
+	async getMessagesChatQueue(limit: number = 10, offset: number = 0) {
+		const results = await this.ctx.storage.sql.exec(
+			`SELECT id, url, payload, created_at, status, retries FROM queue WHERE session_id IS NOT NULL ORDER BY created_at ASC LIMIT ? OFFSET ?`,
+			...[limit, offset],
+		);
+
+		const items = results.toArray();
+		return items.map((item) => ({
+			id: item.id,
+			url: item.url,
+			payload: item.payload,
+			created_at: item.created_at,
+			status: item.status,
+			retries: item.retries,
+		}));
+	}
+
+	async getTotalMessagesChatQueue() {
+		const result = await this.ctx.storage.sql.exec(`SELECT count(id) as total FROM queue WHERE session_id IS NOT NULL;`);
+		return result.toArray()[0].total;
 	}
 }
